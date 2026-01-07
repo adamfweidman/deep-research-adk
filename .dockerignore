@@ -1,0 +1,9 @@
+.venv/
+.git/
+__pycache__/
+.adk/
+.env
+deploy.py
+agent_engine_app.py
+*.pyc
+.DS_Store
