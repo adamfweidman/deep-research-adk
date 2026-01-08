@@ -1,79 +1,91 @@
 import os
 import time
+import warnings
+import asyncio
 from typing import Dict, Any, Optional
+
+# Suppress ADK experimental warnings
+print("NOTE: Suppressing [EXPERIMENTAL] UserWarnings from google.adk for cleaner logs.")
+warnings.filterwarnings("ignore", category=UserWarning, module="google.adk")
+
+from google import genai
 from google.adk.agents import Agent
 from google.adk.tools import FunctionTool, ToolContext
-from google import genai
+from google.adk import Runner
+from google.adk.artifacts import InMemoryArtifactService
+from google.adk.memory.in_memory_memory_service import InMemoryMemoryService
+from google.adk.sessions import InMemorySessionService
 from google.adk.a2a.utils.agent_to_a2a import to_a2a
 
-# Initialize the GenAI client
-# Ensure GOOGLE_API_KEY is set in your environment or .env file
-# For Agent Engine deployment, authentication is handled automatically via Google Cloud credentials
-try:
-    client = genai.Client(api_key=os.environ.get("GOOGLE_API_KEY"))
-except Exception as e:
-    print(f"Warning: Client initialization failed (expected during build/deploy if env vars missing): {e}")
+from a2a.server.agent_execution import AgentExecutor, RequestContext
+from a2a.server.events import EventQueue
+from a2a.server.tasks import TaskUpdater
+from a2a.types import TaskState, TextPart, UnsupportedOperationError, AgentSkill
+from a2a.utils import new_agent_text_message
+from a2a.utils.errors import ServerError
+from vertexai.preview.reasoning_engines import A2aAgent
+from vertexai.preview.reasoning_engines.templates.a2a import create_agent_card
 
-def deep_research(query: str, interaction_id: Optional[str] = None, tool_context: ToolContext = None) -> Dict[str, Any]:
+# Initialize the GenAI client
+try:
+    # Use GEMINI_API_KEY if provided in env
+    api_key = os.environ.get("GEMINI_API_KEY")
+    client = genai.Client(api_key=api_key) if api_key else genai.Client()
+except Exception as e:
+    raise RuntimeError(f"Failed to initialize GenAI Client: {e}") from e
+
+async def deep_research(query: str, interaction_id: Optional[str] = None, tool_context: ToolContext = None) -> Dict[str, Any]:
     """
     Performs deep research. Supports multiple concurrent research threads.
-    
-    Args:
-        query: The research topic or question.
-        interaction_id: (Optional) The ID of a previous interaction to resume/continue. 
-                        If provided, the agent continues that specific research thread.
-                        If NOT provided, a NEW research thread is started.
-        tool_context: Automatically injected ADK context.
-        
-    Returns:
-        Status, report, and a list of active research sessions.
     """
-    print(f"Request: {query} | Resuming ID: {interaction_id}")
+    debug = os.environ.get("DEBUG") == "1"
     
-    # Initialize session registry if it doesn't exist
     if "research_sessions" not in tool_context.state:
         tool_context.state["research_sessions"] = {}
     
     sessions = tool_context.state["research_sessions"]
+    if debug: print(f"[DEBUG] Active sessions in state: {sessions}")
     
-    # Validate provided ID
     prev_id = None
     if interaction_id:
+        if debug: print(f"[DEBUG] Attempting to resume session: {interaction_id}")
         if interaction_id in sessions:
             prev_id = interaction_id
-            print(f"Resuming valid session: {prev_id} ({sessions[prev_id]})")
         else:
             return {"status": "error", "message": f"Interaction ID {interaction_id} not found in history."}
-    else:
-        print("Starting NEW research thread.")
 
     try:
-        # Start or continue interaction
+        if debug: print(f"[DEBUG] Creating research interaction for query: {query} (Resume ID: {prev_id})")
         interaction = client.interactions.create(
             agent="deep-research-pro-preview-12-2025",
             input=query,
             previous_interaction_id=prev_id,
             background=True
         )
+        if debug: print(f"[DEBUG] Started interaction: {interaction.id}")
         
-        print(f"Interaction running (ID: {interaction.id}). Polling...")
-        
-        # Poll for completion
+        start_time = time.time()
+        timeout = 600  # 10 minutes
         while True:
+            if time.time() - start_time > timeout:
+                return {"status": "error", "message": "Research timed out."}
+            
             interaction = client.interactions.get(interaction.id)
+            if debug: print(f"[DEBUG] Status of {interaction.id}: {interaction.status}")
+            
             if interaction.status == "completed":
                 break
             if interaction.status in ["failed", "cancelled"]:
                 return {"status": "error", "message": f"Research failed: {interaction.status}"}
-            time.sleep(5)
+            
+            # Non-blocking async sleep for 10 seconds
+            await asyncio.sleep(10)
         
-        # Save session metadata
-        # We use the first 50 chars of the query as a topic label if it's new
         if not prev_id:
             sessions[interaction.id] = query[:50] + "..."
-            tool_context.state["research_sessions"] = sessions # Persist update
+            tool_context.state["research_sessions"] = sessions
+            if debug: print(f"[DEBUG] Saved new session: {interaction.id}")
         
-        # Get report
         report_text = "No output."
         if interaction.outputs:
             last = interaction.outputs[-1]
@@ -83,50 +95,118 @@ def deep_research(query: str, interaction_id: Optional[str] = None, tool_context
             "status": "success", 
             "report": report_text,
             "current_interaction_id": interaction.id,
-            "active_sessions": sessions # Return list so LLM knows what's available
+            "active_sessions": sessions
         }
 
     except Exception as e:
+        if debug: print(f"[DEBUG] Exception in deep_research: {e}")
         return {"status": "error", "message": str(e)}
 
+def list_research_sessions(tool_context: ToolContext = None) -> Dict[str, Any]:
+    """Returns a list of all active research sessions."""
+    return {
+        "status": "success",
+        "active_sessions": tool_context.state.get("research_sessions", {})
+    }
 
-# Create the FunctionTool
+def clear_research_session(interaction_id: str, tool_context: ToolContext = None) -> Dict[str, Any]:
+    """Clears a specific research session by its interaction ID."""
+    sessions = tool_context.state.get("research_sessions", {})
+    if interaction_id in sessions:
+        del sessions[interaction_id]
+        tool_context.state["research_sessions"] = sessions
+        return {"status": "success", "message": f"Session {interaction_id} cleared."}
+    return {"status": "error", "message": f"Session {interaction_id} not found."}
+
+def clear_all_research_sessions(tool_context: ToolContext = None) -> Dict[str, Any]:
+    """Clears all active research sessions."""
+    tool_context.state["research_sessions"] = {}
+    return {"status": "success", "message": "All sessions cleared."}
+
+# Define tools
 research_tool = FunctionTool(func=deep_research)
+list_sessions_tool = FunctionTool(func=list_research_sessions)
+clear_session_tool = FunctionTool(func=clear_research_session)
+clear_all_sessions_tool = FunctionTool(func=clear_all_research_sessions)
+all_tools = [research_tool, list_sessions_tool, clear_session_tool, clear_all_sessions_tool]
 
-# Define the Agent
+# 1. Standard ADK Agent (for adk run / local testing)
 root_agent = Agent(
     model="gemini-3-flash-preview",
     name="deep_research_assistant",
-    description="An AI research assistant powered by Google's Deep Research capability with persistent multi-session memory.",
+    description="An AI research assistant powered by Google's Deep Research capability.",
     instruction="""
     You are an expert research assistant powered by Google's Deep Research capability.
     
-    CAPABILITIES:
-    1. **Deep Research:** You can perform deep, multi-step research on new topics using the 'deep_research' tool.
-    2. **Memory:** You can remember and continue specific research threads using the `interaction_id` from the tool's output.
-    3. **Conversation:** You can chat normally, summarize findings, and answer questions based on reports you have already retrieved.
+    CRITICAL: You must only call the 'deep_research' tool ONCE per user request. Do not attempt to chain multiple research calls autonomously. After you receive the report from the tool, provide a detailed and comprehensive response back to the user based on the findings.
     
-    GUIDELINES:
-    - **WHEN TO USE TOOL:** 
-      - If the user asks a complex question requiring *new* external information.
-      - If the user explicitly asks to "research" or "find out" something.
-      - If the user wants to *continue* a previous research thread (pass the correct `interaction_id`).
-    
-    - **WHEN TO ANSWER DIRECTLY (NO TOOL):**
-      - If the user is just saying hello or making small talk.
-      - If the user asks a question about the *current* conversation context or a report you just generated.
-      - If the user asks for a summary, rewrite, or analysis of the information you already have.
-    
-    - **Managing Context:**
-      - The 'deep_research' tool returns a list of 'active_sessions'. Use this to map topics to IDs.
-      - To continue a topic, pass the matching `interaction_id`.
-      - To start a new topic, pass NO `interaction_id`.
+    HOW TO MANAGE RESEARCH THREADS:
+    1. **Resuming:** Before starting research, you can call 'list_research_sessions' to see if a relevant thread exists.
+    2. **Using IDs:** If you find a relevant session, pass its key (the interaction_id) to the 'deep_research' tool.
+    3. **New Topics:** If no relevant session exists, call 'deep_research' WITHOUT an interaction_id.
+    4. **Maintenance:** If a user says "forget that research" or "start over", use 'clear_research_session' or 'clear_all_research_sessions'.
     """,
-    tools=[research_tool]
+    tools=all_tools
 )
 
-# A2A Discovery Hoisting
-# This automatically generates an AgentCard based on the root_agent's 
-# name, description, and tools, making it discoverable via A2A.
+# 2. Local A2A Server (for uvicorn agent:a2a_app)
 a2a_app = to_a2a(root_agent)
 
+# 3. Agent Engine A2A Agent (for adk deploy)
+class DeepResearchExecutor(AgentExecutor):
+    def __init__(self):
+        self.agent = root_agent
+        self.runner = Runner(
+            app_name=self.agent.name,
+            agent=self.agent,
+            artifact_service=InMemoryArtifactService(),
+            session_service=InMemorySessionService(),
+            memory_service=InMemoryMemoryService(),
+        )
+
+    async def cancel(self, context: RequestContext, event_queue: EventQueue):
+        raise ServerError(error=UnsupportedOperationError())
+
+    async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
+        updater = TaskUpdater(event_queue, context.task_id, context.context_id)
+        debug = os.environ.get("DEBUG") == "1"
+        try:
+            query = context.get_user_input()
+            session_id = context.context_id or "default-session"
+            if debug: print(f"[DEBUG] Executor starting task {context.task_id} for session {session_id}")
+            
+            if not context.current_task: await updater.submit()
+            await updater.start_work()
+
+            from google.genai import types as genai_types
+            content = genai_types.Content(role='user', parts=[genai_types.Part(text=query)])
+            
+            # TODO: Implement user_id
+            user_id = 'a2a-user'
+
+            async for event in self.runner.run_async(session_id=session_id, user_id=user_id, new_message=content):
+                if event.is_final_response():
+                    text_parts = [TextPart(text=part.text) for part in event.content.parts if part.text]
+                    await updater.add_artifact(text_parts, name='result')
+                    await updater.complete()
+                    if debug: print(f"[DEBUG] Executor completed task {context.task_id}")
+                    break
+                await updater.update_status(TaskState.working, message=new_agent_text_message('Researching...'))
+        except Exception as e:
+            if debug: print(f"[DEBUG] Executor failed task {context.task_id}: {e}")
+            await updater.update_status(TaskState.failed, message=new_agent_text_message(f"Error: {str(e)}"))
+            raise e
+
+agent_skill = AgentSkill(
+    id='deep_research', name='Deep Research',
+    description='Performs deep, multi-step research on any topic.',
+    tags=['Research'], examples=['Research the current state of quantum computing'],
+)
+agent_card = create_agent_card(
+    agent_name='Deep Research Assistant',
+    description='An AI research assistant powered by Google\'s Deep Research capability.',
+    skills=[agent_skill]
+)
+
+# Use the name 'agent' so that 'adk deploy agent_engine' picks this up
+agent = A2aAgent(agent_card=agent_card, agent_executor_builder=DeepResearchExecutor)

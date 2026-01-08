@@ -2,89 +2,98 @@
 
 This project implements an AI agent using the Google Agent Development Kit (ADK) that interfaces with Google's **Deep Research** capability (`deep-research-pro-preview-12-2025`).
 
-It is designed to be deployed to **Vertex AI Agent Engine**.
+It is designed to be deployed to **Vertex AI Agent Engine** and exposed via the **Agent2Agent (A2A)** protocol.
 
 ## Features
 *   **Deep Research Integration**: Wraps the Interactions API to perform long-running research tasks.
-*   **Session Memory**: Uses ADK's `ToolContext` state to persist the `interaction_id`. This allows users to ask follow-up questions and refine the research within the same session.
-*   **Agent Engine Ready**: Configured for deployment to Google Cloud's managed agent runtime.
+*   **Session Memory**: Uses ADK's `ToolContext` state to persist `interaction_id`s across turns.
+*   **Memory Management**: Built-in tools to list, clear individual, or wipe all research sessions.
+*   **A2A Ready**: Native support for the Agent2Agent protocol for multi-agent collaboration.
 
 ## Prerequisites
 
-1.  **Google Cloud Project**: You need a GCP project with billing enabled.
+1.  **Google Cloud Project**: You need a GCP project (e.g., `adamfweidman-test`) with billing enabled.
 2.  **APIs Enabled**:
     *   Vertex AI API (`aiplatform.googleapis.com`)
     *   Generative Language API (for Deep Research)
 3.  **ADK Installed**: `pip install "google-adk[a2a]"`
-4.  **Google Cloud Storage Bucket**: A bucket is required for staging the deployment.
+4.  **Google Cloud Storage Bucket**: Required for staging (e.g., `gs://adamfweidman-test-adk-staging-a2a`).
 
 ## Local Development
 
-1.  **Create and Initialize Virtual Environment**:
+It totally works! 😀 For environments like **Cloudtop**, ensure you are using a virtual environment and have your API key ready.
+
+1.  **Environment Setup**:
     ```bash
+    # Create and activate venv
     uv venv .venv
     source .venv/bin/activate
-    uv pip install -r requirements.txt
+    
+    # Install dependencies (force public PyPI to avoid local config issues)
+    uv pip install -r requirements.txt --index-url https://pypi.org/simple/
     ```
 
-2.  **Set Environment Variables**:
-    Create a `.env` file or export your API key:
+2.  **Authentication**:
+    Export your Gemini API Key (required for the Deep Research Interactions API):
     ```bash
-    export GOOGLE_API_KEY="your-gemini-api-key"
+    export GEMINI_API_KEY="your_api_key_here"
     ```
 
-3.  **Run Locally (CLI)**:
+3.  **Run via CLI**:
+    Interact with the agent directly in your terminal for quick testing:
     ```bash
     adk run .
     ```
 
-## A2A Discovery & Serving
-
-This agent is configured to automatically host an A2A Discovery Card (AgentCard).
-
-1.  **Start the Server**:
+4.  **Run A2A Server Locally**:
+    Start the A2A-compatible server on port `8000` (or `8001` to avoid conflicts with `adk web`):
     ```bash
-    uvicorn agent:a2a_app --host localhost --port 8001
+    # Run with uvicorn
+    uv run uvicorn agent:a2a_app --host localhost --port 8000
     ```
+    The Agent Card will be available for discovery at: `http://localhost:8000/.well-known/agent-card.json`
 
-2.  **Access Agent Card**:
-    The discovery card is available at:
-    `http://localhost:8001/.well-known/agent-card.json`
+## Session Management Tools
+You can now manage your research history using natural language:
+*   **"List my research sessions"**: Displays all active thread IDs and topics.
+*   **"Clear research session [ID]"**: Removes a specific research thread from memory.
+*   **"Clear all research sessions"**: Wipes the entire session history.
+
+## How Memory Works
+This agent uses **Persistent State**:
+1.  **Registry**: Every time a research task starts, its `interaction_id` is saved in `tool_context.state`.
+2.  **Mapping**: The registry maps these IDs to a short summary of the query.
+3.  **Persistence**: 
+    *   **Locally**: State is kept in memory (reset on restart unless saved).
+    *   **On Agent Engine**: State is automatically persisted to a managed backend, meaning your research history survives across different user sessions and agent restarts.
 
 ## Deployment to Agent Engine
 
-To deploy this agent to Google Cloud, use the `adk deploy` command.
+To deploy with A2A endpoints exposed on Vertex AI:
 
 1.  **Authenticate**:
     ```bash
-    gcloud auth login
     gcloud auth application-default login
     ```
 
-2.  **Deploy**:
-    Replace the placeholders with your project details.
-
+2.  **Clean Deployment**:
+    Deploy using the `A2aAgent` class to ensure protocol compatibility:
     ```bash
-    # Set your variables
-    PROJECT_ID="your-project-id"
-    REGION="us-central1"
-    BUCKET="gs://your-staging-bucket"
-
-    # Run deployment
+    # Prepare a clean directory (excluding .venv)
+    mkdir -p ../deploy_tmp
+    cp agent.py requirements.txt ../deploy_tmp/
+    
+    # Deploy
     adk deploy agent_engine \
-      --project=$PROJECT_ID \
-      --region=$REGION \
-      --staging_bucket=$BUCKET \
-      --display_name="Deep Research Agent" \
-      .
+      --project=adamfweidman-test \
+      --region=us-central1 \
+      --staging_bucket=gs://adamfweidman-test-adk-staging-a2a \
+      --display_name="Deep Research Agent A2A" \
+      ../deploy_tmp
     ```
-
-3.  **Test Deployment**:
-    Once deployed, the CLI will output a `RESOURCE_ID`. You can use the Google Cloud Console or the ADK CLI to query your deployed agent.
 
 ## Project Structure
 
-*   `agent.py`: Contains the `root_agent` definition and the `deep_research` tool implementation.
+*   `agent.py`: Unified agent implementation (Standard ADK + A2A + Session Tools).
 *   `requirements.txt`: Python dependencies.
-*   `deep_research_docs.md`: Reference documentation for the Interactions API.
 *   `GEMINI.md`: Project memory and configuration notes.
