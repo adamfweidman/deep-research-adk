@@ -21,7 +21,9 @@ It is designed to be deployed to **Vertex AI Agent Engine** and exposed via the 
 5.  **API Key**: Create a `.env` file in the root directory with `GEMINI_API_KEY=your_key_here`.
 
 ## Local Development
-...
+
+`uvicorn agent:a2a_app --host localhost --port 8000`
+
 ## Deployment to Agent Engine
 
 To deploy with A2A endpoints exposed on Vertex AI:
