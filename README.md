@@ -19,39 +19,43 @@ It is designed to be deployed to **Vertex AI Agent Engine** and exposed via the 
 3.  **ADK Installed**: `pip install "google-adk[a2a]"`
 4.  **Google Cloud Storage Bucket**: Required for staging (e.g., `gs://adamfweidman-test-adk-staging-a2a`).
 
-## Local Development
+## How to Run & Test
 
-It totally works! 😀 For environments like **Cloudtop**, ensure you are using a virtual environment and have your API key ready.
+There are four ways to interact with this agent, depending on your needs:
 
-1.  **Environment Setup**:
-    ```bash
-    # Create and activate venv
-    uv venv .venv
-    source .venv/bin/activate
-    
-    # Install dependencies (force public PyPI to avoid local config issues)
-    uv pip install -r requirements.txt --index-url https://pypi.org/simple/
-    ```
+### 1. CLI Mode (Standard ADK)
+Quick terminal-based interaction.
+```bash
+adk run .
+```
 
-2.  **Authentication**:
-    Export your Gemini API Key (required for the Deep Research Interactions API):
-    ```bash
-    export GEMINI_API_KEY="your_api_key_here"
-    ```
+### 2. Web Mode (Graphical Debugger)
+The ADK Web UI. **Note:** Since `adk web` scans for subdirectories, run this from the project root pointing to the parent folder.
+```bash
+adk web ..
+```
 
-3.  **Run via CLI**:
-    Interact with the agent directly in your terminal for quick testing:
-    ```bash
-    adk run .
-    ```
+### 3. Local A2A Server (API Mode)
+Start a local A2A-compliant server (default port 8000). Useful for testing multi-agent delegation. Use `DEBUG=1` to see session IDs and research status.
+```bash
+# Enable verbose logging
+export DEBUG=1
+uv run uvicorn agent:a2a_app --host localhost --port 8000
+```
+*   **Agent Card:** `http://localhost:8000/.well-known/agent-card.json`
 
-4.  **Run A2A Server Locally**:
-    Start the A2A-compatible server on port `8000` (or `8001` to avoid conflicts with `adk web`):
-    ```bash
-    # Run with uvicorn
-    uv run uvicorn agent:a2a_app --host localhost --port 8000
-    ```
-    The Agent Card will be available for discovery at: `http://localhost:8000/.well-known/agent-card.json`
+### 4. Remote Deployment (Agent Engine)
+Deploy to Google Cloud Vertex AI Agent Engine. **Note:** Run this from the **parent directory** of the project.
+```bash
+# From the parent directory (e.g., ~/Desktop/a2a/)
+adk deploy agent_engine \
+  --project="YOUR_PROJECT_ID" \
+  --region="us-central1" \
+  --staging_bucket="gs://YOUR_BUCKET_NAME" \
+  --display_name="Deep Research Agent A2A" \
+  --adk_app_object app \
+  deep_research_adk
+```
 
 ## Session Management Tools
 You can now manage your research history using natural language:

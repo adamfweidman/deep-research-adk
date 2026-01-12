@@ -3,6 +3,10 @@ import time
 import warnings
 import asyncio
 from typing import Dict, Any, Optional
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Suppress ADK experimental warnings
 print("NOTE: Suppressing [EXPERIMENTAL] UserWarnings from google.adk for cleaner logs.")
@@ -26,13 +30,16 @@ from a2a.utils.errors import ServerError
 from vertexai.preview.reasoning_engines import A2aAgent
 from vertexai.preview.reasoning_engines.templates.a2a import create_agent_card
 
-# Initialize the GenAI client
-try:
-    # Use GEMINI_API_KEY if provided in env
-    api_key = os.environ.get("GEMINI_API_KEY")
-    client = genai.Client(api_key=api_key) if api_key else genai.Client()
-except Exception as e:
-    raise RuntimeError(f"Failed to initialize GenAI Client: {e}") from e
+# Initialize the GenAI client lazily
+def get_client():
+    try:
+        # Use GEMINI_API_KEY if provided in env
+        api_key = os.environ.get("GEMINI_API_KEY")
+        if not api_key:
+            raise ValueError("GEMINI_API_KEY environment variable not set.")
+        return genai.Client(api_key=api_key)
+    except Exception as e:
+        raise RuntimeError(f"Failed to initialize GenAI Client: {e}") from e
 
 async def deep_research(query: str, interaction_id: Optional[str] = None, tool_context: ToolContext = None) -> Dict[str, Any]:
     """
@@ -40,6 +47,12 @@ async def deep_research(query: str, interaction_id: Optional[str] = None, tool_c
     """
     debug = os.environ.get("DEBUG") == "1"
     
+    # Initialize client inside the function
+    try:
+        client = get_client()
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
     if "research_sessions" not in tool_context.state:
         tool_context.state["research_sessions"] = {}
     
@@ -208,5 +221,11 @@ agent_card = create_agent_card(
     skills=[agent_skill]
 )
 
-# Use the name 'agent' so that 'adk deploy agent_engine' picks this up
-agent = A2aAgent(agent_card=agent_card, agent_executor_builder=DeepResearchExecutor)
+# Use the name 'app' and the flag --adk_app_object app so that 'adk deploy' picks this up
+app = A2aAgent(agent_card=agent_card, agent_executor_builder=DeepResearchExecutor)
+app.name = "deep_research_assistant"
+app.description = "An AI research assistant powered by Google's Deep Research capability."
+app.root_agent = root_agent
+app.plugins = []
+app.context_cache_config = None
+app.resumability_config = None
